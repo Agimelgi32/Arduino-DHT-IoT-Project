@@ -16,3 +16,9 @@ disimpan pada Micro SD-Card dan ditransmisikan ke aplikasi yang dibuat khusus un
 penampilan data pada telepon genggam oleh Bluetooth HC-05. Prototipe ini juga
 memanfaatkan cloud spreadsheet untuk penyimpanan melalui aplikasi. Metode penelitian
 yang digunakan adalah metode perbandingan langsung anatara objek uji dan standar.
+
+
+
+Diagram Blok Pengkabelan
+![New Wiring Fix](https://user-images.githubusercontent.com/97215723/193296170-41c5124c-10c1-4046-8b16-2fc21e6a45d5.png)
+
