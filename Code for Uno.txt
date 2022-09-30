@@ -1,0 +1,1197 @@
+============================================V1=======================================================
+
+#include <Arduino.h>
+#include <U8g2lib.h>
+#include "RTClib.h"
+#include "DHT.h"
+#include <Wire.h> // Memanggil library untuk komunikasi I2C
+
+#ifdef U8X8_HAVE_HW_SPI
+#include <SPI.h>
+#endif
+#ifdef U8X8_HAVE_HW_I2C
+#include <Wire.h>
+#endif
+
+#define alamatSlave 10 // Alamat Slave untuk Arduino
+#define DHTPIN  8             // DHT22 data pin is connected to Arduino pin 8
+#define DHTTYPE DHT11         // DHT22 sensor is used
+DHT dht(DHTPIN, DHTTYPE);     // Initialize DHT library
+
+// Variables to store the time
+volatile byte _months, _date, _hours, _seconds, _minutes;
+int _years, _yr;
+int _dtmax = 31;
+volatile byte _mt, _dt, _hr, _s, _m;  
+RTC_DS3231 RTC;
+float t,h;
+float t1,h1;
+float t2,h2;
+char* dataMaster; // Variabel untuk menampung data komunikasi antara master dan slave 
+
+// Constants for the button pins
+// The FALLING interrupt is only available at pin 2 and 3 on the Arduino UNO 
+const int PIN_BUTTON_MODE = 3;
+const int PIN_BUTTON_SET = 2;
+
+const int BUTTON_MODE_DEBOUNCE_TIME = 250;
+const int BUTTON_SET_DEBOUNCE_TIME = 250;
+
+const int MODE_SET_TIMEOUT = 5000;
+
+const int MODE_SHOW_TIME = 0;
+const int MODE_SET_SECONDS = 6;
+const int MODE_SET_MINUTES = 5;
+const int MODE_SET_HOURS = 4;
+const int MODE_SET_YEARS = 3;
+const int MODE_SET_MONTHS = 2;
+const int MODE_SET_DATE = 1;
+const int MODE_SET_TEMP = 7;
+const int MODE_SET_HUM = 8;
+
+// Button state variables
+unsigned long elapsedButtonModeMillis = 0;
+unsigned long previousButtonModeMillis = 0;
+
+unsigned long elapsedButtonSetMillis = 0;
+unsigned long previousButtonSetMillis = 0;
+
+// Char array for the time being showed on the display
+char timeString[25];
+char dataString[10];
+
+// Variables to store the time
+unsigned long currentMillis = 0;
+
+// Int is enough to store the elapsed time
+unsigned long elapsedTimeUpdateMillis = 0;
+unsigned long previousTimeUpdateMillis = 0;
+
+float percentageOfSecondElapsed = 0;
+
+byte currentMode = MODE_SHOW_TIME;
+
+volatile boolean buttonModePressed = false;
+volatile boolean buttonSetPressed = false;
+
+const int relayA = 10;          //air heater    
+const int relayC = 11;         //cooler fan
+const int relayH = 9;         //humidifier
+const int relayD = 12;         //dehumidifier
+const long TmrInterval = 1000;          //--Variables for Time and Date
+unsigned long TmrPrev = 0;      
+
+// A complete list of all displays is available at: https://github.com/olikraus/u8g2/wiki/u8g2setupcpp
+U8G2_SSD1306_128X32_UNIVISION_1_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);   // Adafruit ESP8266/32u4/ARM Boards + FeatherWing OLED
+
+void setup(void) {
+  
+  Serial.begin(9600); // Memulai komunikasi serial pada baud rate 9600
+  u8g2.begin();
+  dht.begin();
+  RTC.begin();
+  Wire.begin(); // Memulai komunikasi I2C pada PIN A4 dan PIN A5
+//  pinMode(relayA, OUTPUT);
+//  pinMode(relayC, OUTPUT);
+//  pinMode(relayH, OUTPUT);
+//  pinMode(relayD, OUTPUT);
+
+  // Empty the interrupt queue. This makes sure there are 
+  // no old pending interrupts in the queue which are processed on startup
+  // More info: https://arduino.stackexchange.com/questions/30968/how-do-interrupts-work-on-the-arduino-uno-and-similar-boards
+  EIFR = bit (INTF0);  // clear flag for interrupt 0
+  EIFR = bit (INTF1);  // clear flag for interrupt 1
+
+  digitalWrite(PIN_BUTTON_MODE, HIGH);
+  digitalWrite(PIN_BUTTON_SET, HIGH);
+
+  // Configure the pins of the buttons with the internal PULLUP resistor
+  pinMode(PIN_BUTTON_MODE, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(PIN_BUTTON_MODE), modeButtonPressedInterrupt, FALLING);
+
+  pinMode(PIN_BUTTON_SET, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(PIN_BUTTON_SET), setButtonPressedInterrupt, FALLING);
+
+}
+
+void loop(void) {
+
+  h = dht.readHumidity();
+  t = dht.readTemperature();
+  t2 = t1 + t;
+  h2 = h1 + h;  
+//  if (isnan(h) || isnan(t)) {
+//    Serial.println(F("Failed to read from DHT sensor!"));
+//    return;
+//  }
+  currentMillis = millis();
+
+  elapsedButtonModeMillis = currentMillis - previousButtonModeMillis;
+  elapsedButtonSetMillis = currentMillis - previousButtonSetMillis;
+      
+//   if(t<18) {
+//     digitalWrite(relayA,HIGH);
+//     Serial.println("Heating");
+//      }
+//   if(t>23){
+//     digitalWrite(relayC,HIGH);
+//     Serial.println("Cooling");
+//      } 
+//   if(h<40) {
+//     digitalWrite(relayH,HIGH);
+//     Serial.println("Humidifying");
+//      }
+//   if(h>70) {
+//     digitalWrite(relayD,HIGH);
+//     Serial.println("Drying");
+//      }
+//      else {
+//    digitalWrite(relayA,LOW);
+//    digitalWrite(relayC,LOW);
+//    digitalWrite(relayH,LOW);
+//    digitalWrite(relayD,LOW);
+//      }
+//delay(1000);
+  checkTime();
+  if (currentMode == MODE_SHOW_TIME) {
+    increaseSeconds();
+  } else {
+
+    if (elapsedButtonModeMillis > MODE_SET_TIMEOUT && elapsedButtonSetMillis > MODE_SET_TIMEOUT) {
+      currentMode = MODE_SHOW_TIME;
+    }
+    
+    previousTimeUpdateMillis = currentMillis;
+  }
+
+  if (buttonModePressed) {
+    modeButtonHandler();
+  }
+
+  if (buttonSetPressed) {
+    buttonSetHandler();
+  }
+  dataTransmission();
+  drawScreen();
+
+}
+
+void checkTime() {
+  DateTime now = RTC.now();
+  _years=now.year();
+  _months=now.month();
+  _date=now.day();
+  _hours=now.hour();
+  _minutes=now.minute();
+  _seconds=now.second();
+  
+  if (_minutes > 59) {
+    _minutes = 0;
+  }
+  if (_hours > 23) {
+    _hours = 0;
+  }
+  if (_m > 59) {
+    _m = 0;
+  }
+  if (_dt > _dtmax) {
+    _dt = 1;
+  }
+  if (_mt > 12) {
+    _mt = 1;
+  }
+  if (_yr > 50) {
+    _yr = 22;
+  }
+  if (_mt == 4 || 6 || 9 || 11) {
+    _dtmax = 30;
+  }
+  if (_mt == 2) {
+    _dtmax = 29;
+  }
+  if (t1 > 10) {
+    t1 = 0;
+  }
+  if (h1 > 10) {
+    h1 = 0;
+  }
+}
+
+void modeButtonPressedInterrupt() {
+  buttonModePressed = true;
+}
+
+void dataTransmission() {
+  char charData[30];
+  String data = String(_hours) + ":" + String(_minutes) 
+                + ":" + String(_seconds) + "," + String(_date) 
+                + "/" + String(_months) + "/" + String(_years) 
+                + "," + String(t,1) + "," + String(h,0);
+  data.toCharArray(charData,30);
+  dataMaster = charData;
+  Wire.beginTransmission(alamatSlave); // Master memulai pengiriman data ke alamat slave
+  Wire.write(dataMaster); // Master menuliskan data
+  Serial.print("Master mengirimkan nilai Pesan : "); // Menampilkan konten pada Serial Monitor 
+  Serial.println(dataMaster); // Menampilkan konten pada Serial Monitor 
+  Wire.endTransmission(); // Mengakiri sesi pengiriman data  
+}
+void modeButtonHandler() {
+  if (elapsedButtonModeMillis > BUTTON_MODE_DEBOUNCE_TIME) {
+    previousButtonModeMillis = currentMillis;
+    currentMode++;
+
+    if (currentMode > 8) {
+      currentMode = 0;
+    }
+  }
+  buttonModePressed = false;
+}
+
+void setButtonPressedInterrupt() {
+  buttonSetPressed = true;
+}
+
+void buttonSetHandler() {
+  if (elapsedButtonSetMillis > BUTTON_SET_DEBOUNCE_TIME) {
+    previousButtonSetMillis = currentMillis;
+
+    if (currentMode == MODE_SET_SECONDS) {
+      _s = 0;
+    }
+    if (currentMode == MODE_SET_MINUTES) {
+      _m++;
+    }
+    if (currentMode == MODE_SET_HOURS) {
+      _hr++;
+    }
+    if (currentMode == MODE_SET_YEARS) {
+      _yr++;
+    }
+    if (currentMode == MODE_SET_MONTHS) {
+      _mt++;
+    }
+    if (currentMode == MODE_SET_DATE) {
+      _dt++;
+    }
+    if (currentMode == MODE_SET_TEMP) {
+      t1--;
+    }
+    if (currentMode == MODE_SET_HUM) {
+      h1++;
+    }
+  }
+  buttonSetPressed = false;
+}
+
+void increaseSeconds() {
+  elapsedTimeUpdateMillis = currentMillis - previousTimeUpdateMillis;
+
+  // Check if 1000ms, 1 second, has been elapsed
+  if (elapsedTimeUpdateMillis > 1000) {
+    previousTimeUpdateMillis = currentMillis - (elapsedTimeUpdateMillis - 1000);
+  }
+}
+
+void drawScreen() {
+  u8g2.firstPage();
+  
+  do {
+
+    if (currentMode != MODE_SHOW_TIME) {
+      u8g2.setCursor(8,15);
+      t = t1;
+      h = h1;
+      RTC.adjust(DateTime (_yr, _mt, _dt, _hr, _m, _s));
+      //u8g2.drawStr(15,10,"Setting waktu");
+//      u8g2.drawTriangle((currentMode - 1) * 20 + 1, 18, currentMode * 20 - 2, 20, (currentMode - 1) * 20 + 15, 18);
+//      u8g2.drawTriangle((currentMode - 1) * 20 + 1, 18, currentMode * 20 - 2, 20, (currentMode - 1) * 20 + 15, 18);
+       if (currentMode > 3 && currentMode < 7 ) {
+        u8g2.drawLine(currentMode*15+18, 17, currentMode*15+28, 17);
+       }
+       else if (currentMode == 7) {
+        u8g2.drawLine(70,1,70,15);
+       }
+       else if (currentMode == 8) {
+        u8g2.drawLine(120,1,120,15);
+       }
+       else {
+        u8g2.drawLine((currentMode - 1) * 15 + 5, 17, currentMode * 15 + 2, 17);
+       }
+
+    }  
+    u8g2.drawLine(0, 20, 128, 20);
+    drawTime();
+    drawData();
+
+  } while (u8g2.nextPage());
+}
+
+void drawTime() {
+  
+  sprintf_P(timeString, PSTR("%02d/%02d/%d<>%02d:%02d:%02d"), _date, _months, _years, _hours, _minutes, _seconds);
+  
+  u8g2.setFont(u8g2_font_courB08_tf);
+  u8g2.drawStr(3,32, timeString);
+
+}
+
+void drawData() {
+
+  String temp = String(t2,1) + "oC"; 
+  String hum = String(h2,0) + "%";
+  
+  u8g2.setFont(u8g2_font_VCR_OSD_mu);
+  u8g2.setCursor(8,15);
+  u8g2.print(temp);
+  u8g2.setCursor(80,15);
+  u8g2.print(hum);
+}
+
+============================================V2=======================================================
+/*
+#include <Arduino.h>
+#include <U8g2lib.h>
+#include "RTClib.h"
+#include "DHT.h"
+#include <Wire.h> // Memanggil library untuk komunikasi I2C
+#include <SoftwareSerial.h> 
+
+#ifdef U8X8_HAVE_HW_SPI
+#include <SPI.h>
+#endif
+#ifdef U8X8_HAVE_HW_I2C
+#include <Wire.h>
+#endif
+
+#define alamatSlave 10 // Alamat Slave untuk Arduino
+#define DHTPIN  8             // DHT22 data pin is connected to Arduino pin 8
+#define DHTTYPE DHT11         // DHT22 sensor is used
+DHT dht(DHTPIN, DHTTYPE);     // Initialize DHT library
+SoftwareSerial bt(0, 1); // RX, TX
+
+// Variables to store the time
+volatile byte _months, _date, _hours, _seconds, _minutes;
+int _years, _yr;
+int _dtmax = 31;
+volatile byte _mt, _dt, _hr, _s, _m;  
+RTC_DS3231 RTC;
+float t,h;
+float t1,h1;
+float t2,h2;
+char* dataMaster; // Variabel untuk menampung data komunikasi antara master dan slave 
+
+// Constants for the button pins
+// The FALLING interrupt is only available at pin 2 and 3 on the Arduino UNO 
+const int PIN_BUTTON_MODE = 3;
+const int PIN_BUTTON_SET = 2;
+
+const int BUTTON_MODE_DEBOUNCE_TIME = 250;
+const int BUTTON_SET_DEBOUNCE_TIME = 250;
+
+const int MODE_SET_TIMEOUT = 5000;
+
+const int MODE_SHOW_TIME = 0;
+const int MODE_SET_SECONDS = 6;
+const int MODE_SET_MINUTES = 5;
+const int MODE_SET_HOURS = 4;
+const int MODE_SET_YEARS = 3;
+const int MODE_SET_MONTHS = 2;
+const int MODE_SET_DATE = 1;
+const int MODE_SET_TEMP = 7;
+const int MODE_SET_HUM = 8;
+
+// Button state variables
+unsigned long elapsedButtonModeMillis = 0;
+unsigned long previousButtonModeMillis = 0;
+
+unsigned long elapsedButtonSetMillis = 0;
+unsigned long previousButtonSetMillis = 0;
+
+// Char array for the time being showed on the display
+char timeString[25];
+char dataString[10];
+
+// Variables to store the time
+unsigned long currentMillis = 0;
+
+// Int is enough to store the elapsed time
+unsigned long elapsedTimeUpdateMillis = 0;
+unsigned long previousTimeUpdateMillis = 0;
+
+float percentageOfSecondElapsed = 0;
+
+byte currentMode = MODE_SHOW_TIME;
+
+volatile boolean buttonModePressed = false;
+volatile boolean buttonSetPressed = false;
+
+const int relayA = 10;          //air heater    
+const int relayC = 11;         //cooler fan
+const int relayH = 9;         //humidifier
+const int relayD = 12;         //dehumidifier
+const long TmrInterval = 1000;          //--Variables for Time and Date
+unsigned long TmrPrev = 0;      
+
+// A complete list of all displays is available at: https://github.com/olikraus/u8g2/wiki/u8g2setupcpp
+U8G2_SSD1306_128X32_UNIVISION_1_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);   // Adafruit ESP8266/32u4/ARM Boards + FeatherWing OLED
+
+void setup(void) {
+  
+  Serial.begin(9600); // Memulai komunikasi serial pada baud rate 9600
+  u8g2.begin();
+  dht.begin();
+  RTC.begin();
+  Wire.begin(); // Memulai komunikasi I2C pada PIN A4 dan PIN A5
+//  pinMode(relayA, OUTPUT);
+//  pinMode(relayC, OUTPUT);
+//  pinMode(relayH, OUTPUT);
+//  pinMode(relayD, OUTPUT);
+
+  // Empty the interrupt queue. This makes sure there are 
+  // no old pending interrupts in the queue which are processed on startup
+  // More info: https://arduino.stackexchange.com/questions/30968/how-do-interrupts-work-on-the-arduino-uno-and-similar-boards
+  EIFR = bit (INTF0);  // clear flag for interrupt 0
+  EIFR = bit (INTF1);  // clear flag for interrupt 1
+
+  digitalWrite(PIN_BUTTON_MODE, HIGH);
+  digitalWrite(PIN_BUTTON_SET, HIGH);
+
+  // Configure the pins of the buttons with the internal PULLUP resistor
+  pinMode(PIN_BUTTON_MODE, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(PIN_BUTTON_MODE), modeButtonPressedInterrupt, FALLING);
+
+  pinMode(PIN_BUTTON_SET, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(PIN_BUTTON_SET), setButtonPressedInterrupt, FALLING);
+
+}
+
+void loop(void) {
+
+  h = dht.readHumidity();
+  t = dht.readTemperature();
+  t2 = t1 + t;
+  h2 = h1 + h;  
+//  if (isnan(h) || isnan(t)) {
+//    Serial.println(F("Failed to read from DHT sensor!"));
+//    return;
+//  }
+  currentMillis = millis();
+
+  elapsedButtonModeMillis = currentMillis - previousButtonModeMillis;
+  elapsedButtonSetMillis = currentMillis - previousButtonSetMillis;
+      
+//   if(t<18) {
+//     digitalWrite(relayA,HIGH);
+//     Serial.println("Heating");
+//      }
+//   if(t>23){
+//     digitalWrite(relayC,HIGH);
+//     Serial.println("Cooling");
+//      } 
+//   if(h<40) {
+//     digitalWrite(relayH,HIGH);
+//     Serial.println("Humidifying");
+//      }
+//   if(h>70) {
+//     digitalWrite(relayD,HIGH);
+//     Serial.println("Drying");
+//      }
+//      else {
+//    digitalWrite(relayA,LOW);
+//    digitalWrite(relayC,LOW);
+//    digitalWrite(relayH,LOW);
+//    digitalWrite(relayD,LOW);
+//      }
+//delay(1000);
+  checkTime();
+  if (currentMode == MODE_SHOW_TIME) {
+    increaseSeconds();
+  } else {
+
+    if (elapsedButtonModeMillis > MODE_SET_TIMEOUT && elapsedButtonSetMillis > MODE_SET_TIMEOUT) {
+      currentMode = MODE_SHOW_TIME;
+    }
+    
+    previousTimeUpdateMillis = currentMillis;
+  }
+
+  if (buttonModePressed) {
+    modeButtonHandler();
+  }
+
+  if (buttonSetPressed) {
+    buttonSetHandler();
+  }
+  dataTransmission();
+  drawScreen();
+
+}
+
+void checkTime() {
+  DateTime now = RTC.now();
+  _years=now.year();
+  _months=now.month();
+  _date=now.day();
+  _hours=now.hour();
+  _minutes=now.minute();
+  _seconds=now.second();
+  
+  if (_minutes > 59) {
+    _minutes = 0;
+  }
+  if (_hours > 23) {
+    _hours = 0;
+  }
+  if (_m > 59) {
+    _m = 0;
+  }
+  if (_dt > _dtmax) {
+    _dt = 1;
+  }
+  if (_mt > 12) {
+    _mt = 1;
+  }
+  if (_yr > 50) {
+    _yr = 22;
+  }
+  if (_mt == 4 || 6 || 9 || 11) {
+    _dtmax = 30;
+  }
+  if (_mt == 2) {
+    _dtmax = 29;
+  }
+  if (t1 > 10) {
+    t1 = 0;
+  }
+  if (h1 > 10) {
+    h1 = 0;
+  }
+}
+
+void modeButtonPressedInterrupt() {
+  buttonModePressed = true;
+}
+
+void dataTransmission() {
+  char charData[30];
+  String data = String(_hours) + ":" + String(_minutes) 
+                + ":" + String(_seconds) + "," + String(_date) 
+                + "/" + String(_months) + "/" + String(_years) 
+                + "," + String(t,1) + "," + String(h,0);
+  data.toCharArray(charData,30);
+  dataMaster = charData;
+  Wire.beginTransmission(alamatSlave); // Master memulai pengiriman data ke alamat slave
+  Wire.write(dataMaster); // Master menuliskan data
+  Serial.print("Master mengirimkan nilai Pesan : "); // Menampilkan konten pada Serial Monitor 
+  Serial.println(dataMaster); // Menampilkan konten pada Serial Monitor 
+  Wire.endTransmission(); // Mengakiri sesi pengiriman data  
+}
+void modeButtonHandler() {
+  if (elapsedButtonModeMillis > BUTTON_MODE_DEBOUNCE_TIME) {
+    previousButtonModeMillis = currentMillis;
+    currentMode++;
+
+    if (currentMode > 8) {
+      currentMode = 0;
+    }
+  }
+  buttonModePressed = false;
+}
+
+void setButtonPressedInterrupt() {
+  buttonSetPressed = true;
+}
+
+void buttonSetHandler() {
+  if (elapsedButtonSetMillis > BUTTON_SET_DEBOUNCE_TIME) {
+    previousButtonSetMillis = currentMillis;
+
+    if (currentMode == MODE_SET_SECONDS) {
+      _s = 0;
+    }
+    if (currentMode == MODE_SET_MINUTES) {
+      _m++;
+    }
+    if (currentMode == MODE_SET_HOURS) {
+      _hr++;
+    }
+    if (currentMode == MODE_SET_YEARS) {
+      _yr++;
+    }
+    if (currentMode == MODE_SET_MONTHS) {
+      _mt++;
+    }
+    if (currentMode == MODE_SET_DATE) {
+      _dt++;
+    }
+    if (currentMode == MODE_SET_TEMP) {
+      t1--;
+    }
+    if (currentMode == MODE_SET_HUM) {
+      h1++;
+    }
+  }
+  buttonSetPressed = false;
+}
+
+void increaseSeconds() {
+  elapsedTimeUpdateMillis = currentMillis - previousTimeUpdateMillis;
+
+  // Check if 1000ms, 1 second, has been elapsed
+  if (elapsedTimeUpdateMillis > 1000) {
+    previousTimeUpdateMillis = currentMillis - (elapsedTimeUpdateMillis - 1000);
+  Serial.print(t);     //kirim serial nilai suhu
+  Serial.println(",");    
+  Serial.print(h);     //kirim serial nilai kelembaban
+  }
+}
+
+void drawScreen() {
+  u8g2.firstPage();
+  
+  do {
+
+    if (currentMode != MODE_SHOW_TIME) {
+      u8g2.setCursor(8,15);
+      t = t1;
+      h = h1;
+      RTC.adjust(DateTime (_yr, _mt, _dt, _hr, _m, _s));
+      //u8g2.drawStr(15,10,"Setting waktu");
+//      u8g2.drawTriangle((currentMode - 1) * 20 + 1, 18, currentMode * 20 - 2, 20, (currentMode - 1) * 20 + 15, 18);
+//      u8g2.drawTriangle((currentMode - 1) * 20 + 1, 18, currentMode * 20 - 2, 20, (currentMode - 1) * 20 + 15, 18);
+       if (currentMode > 3 && currentMode < 7 ) {
+        u8g2.drawLine(currentMode*15+18, 17, currentMode*15+28, 17);
+       }
+       else if (currentMode == 7) {
+        u8g2.drawLine(70,1,70,15);
+       }
+       else if (currentMode == 8) {
+        u8g2.drawLine(120,1,120,15);
+       }
+       else {
+        u8g2.drawLine((currentMode - 1) * 15 + 5, 17, currentMode * 15 + 2, 17);
+       }
+
+    }  
+    u8g2.drawLine(0, 20, 128, 20);
+    drawTime();
+    drawData();
+
+  } while (u8g2.nextPage());
+}
+
+void drawTime() {
+  
+  sprintf_P(timeString, PSTR("%02d/%02d/%d<>%02d:%02d:%02d"), _date, _months, _years, _hours, _minutes, _seconds);
+  
+  u8g2.setFont(u8g2_font_courB08_tf);
+  u8g2.drawStr(3,32, timeString);
+
+}
+
+void drawData() {
+
+  String temp = String(t2,1) + "oC"; 
+  String hum = String(h2,0) + "%";
+  
+  u8g2.setFont(u8g2_font_VCR_OSD_mu);
+  u8g2.setCursor(8,15);
+  u8g2.print(temp);
+  u8g2.setCursor(80,15);
+  u8g2.print(hum);
+}
+*/
+
+============================================V3=======================================================
+
+#include <Arduino.h>
+#include <U8g2lib.h>
+#include "RTClib.h"
+#include "DHT.h"
+#include <Wire.h> // Memanggil library untuk komunikasi I2C
+//#include <SoftwareSerial.h> 
+
+#ifdef U8X8_HAVE_HW_SPI
+#include <SPI.h>
+#endif
+#ifdef U8X8_HAVE_HW_I2C
+#include <Wire.h>
+#endif
+
+#define alamatSlave 10 // Alamat Slave untuk Arduino
+#define DHTPIN  8             // DHT22 data pin is connected to Arduino pin 8
+#define DHTTYPE DHT22         // DHT22 sensor is used
+DHT dht(DHTPIN, DHTTYPE);     // Initialize DHT library
+//SoftwareSerial bt(0, 1); // RX, TX
+
+// Variables to store the time
+volatile byte _months, _date, _hours, _seconds, _minutes;
+int _years, _yr;
+int _dtmax = 31;
+volatile byte _mt, _dt, _hr, _s, _m;  
+RTC_DS3231 RTC;
+float t,h;
+float t1,h1;
+float t2,h2;
+char* dataMaster; // Variabel untuk menampung data komunikasi antara master dan slave 
+
+// Constants for the button pins
+// The FALLING interrupt is only available at pin 2 and 3 on the Arduino UNO 
+const int PIN_BUTTON_MODE = 5;
+//const int PIN_BUTTON_SET = 2;
+const byte buttonPin1 = 2;
+const byte buttonPin2 = 3;
+
+// Booleans for input states
+volatile bool D2_state = HIGH;
+volatile bool D5_state = HIGH;
+
+const int BUTTON_MODE_DEBOUNCE_TIME = 250;
+const int BUTTON_SET_DEBOUNCE_TIME = 250;
+const int MODE_SET_TIMEOUT = 5000;
+
+const int MODE_SHOW_TIME = 0;
+const int MODE_SET_SECONDS = 6;
+const int MODE_SET_MINUTES = 5;
+const int MODE_SET_HOURS = 4;
+const int MODE_SET_YEARS = 3;
+const int MODE_SET_MONTHS = 2;
+const int MODE_SET_DATE = 1;
+const int MODE_SET_TEMP = 7;
+const int MODE_SET_HUM = 8;
+
+// Button state variables
+unsigned long elapsedButtonModeMillis = 0;
+unsigned long previousButtonModeMillis = 0;
+
+unsigned long elapsedButtonSetMillis = 0;
+unsigned long previousButtonSetMillis = 0;
+
+// Char array for the time being showed on the display
+char timeString[25];
+char dataString[10];
+
+// Variables to store the time
+unsigned long currentMillis = 0;
+
+// Int is enough to store the elapsed time
+unsigned long elapsedTimeUpdateMillis = 0;
+unsigned long previousTimeUpdateMillis = 0;
+
+float percentageOfSecondElapsed = 0;
+
+byte currentMode = MODE_SHOW_TIME;
+
+volatile boolean buttonModePressed = false;
+volatile boolean buttonSetUpPressed = false;
+volatile boolean buttonSetDownPressed = false;
+
+//const int relayA = 10;          //air heater    
+//const int relayC = 11;         //cooler fan
+//const int relayH = 9;         //humidifier
+//const int relayD = 12;         //dehumidifier
+
+const long TmrInterval = 1000;          //--Variables for Time and Date
+unsigned long TmrPrev = 0;      
+
+// A complete list of all displays is available at: https://github.com/olikraus/u8g2/wiki/u8g2setupcpp
+U8G2_SSD1306_128X32_UNIVISION_1_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);   // Adafruit ESP8266/32u4/ARM Boards + FeatherWing OLED
+
+void setup(void) {
+  
+  Serial.begin(9600); // Memulai komunikasi serial pada baud rate 9600
+  u8g2.begin();
+  dht.begin();
+  RTC.begin();
+  Wire.begin(); // Memulai komunikasi I2C pada PIN A4 dan PIN A5
+//  pinMode(relayA, OUTPUT);
+//  pinMode(relayC, OUTPUT);
+//  pinMode(relayH, OUTPUT);
+//  pinMode(relayD, OUTPUT);
+
+  // Empty the interrupt queue. This makes sure there are 
+  // no old pending interrupts in the queue which are processed on startup
+  // More info: https://arduino.stackexchange.com/questions/30968/how-do-interrupts-work-on-the-arduino-uno-and-similar-boards
+  EIFR = bit (INTF0);  // clear flag for interrupt 0
+  EIFR = bit (INTF1);  // clear flag for interrupt 1
+
+//  digitalWrite(PIN_BUTTON_MODE, HIGH);
+//  digitalWrite(PIN_BUTTON_SET, HIGH);
+
+  // Configure the pins of the buttons with the internal PULLUP resistor
+  pinMode(PIN_BUTTON_MODE, INPUT_PULLUP);
+//  attachInterrupt(digitalPinToInterrupt(PIN_BUTTON_MODE), modeButtonPressedInterrupt, FALLING);
+
+//  pinMode(PIN_BUTTON_SET, INPUT_PULLUP);
+//  attachInterrupt(digitalPinToInterrupt(PIN_BUTTON_SET), setButtonPressedInterrupt, FALLING);
+
+    // Set switches as inputs with pullups
+  pinMode(buttonPin1, INPUT_PULLUP);
+  pinMode(buttonPin2, INPUT_PULLUP);
+
+  // Enable PCIE2 Bit3 = 1 (Port D)
+  PCICR |= B00000100;
+  // Enable PCINT18  & PCINT23 (Pins D2, D3, D5)
+  PCMSK2 |= B00101100;
+}
+
+void loop(void) {
+
+  h = dht.readHumidity();
+  t = dht.readTemperature();
+  t2 = t1 + t;
+  h2 = h1 + h;  
+//  if (isnan(h) || isnan(t)) {
+//    Serial.println(F("Failed to read from DHT sensor!"));
+//    return;
+//  }
+  currentMillis = millis();
+
+  elapsedButtonModeMillis = currentMillis - previousButtonModeMillis;
+  elapsedButtonSetMillis = currentMillis - previousButtonSetMillis;
+      
+//   if(t<18) {
+//     digitalWrite(relayA,HIGH);
+//     Serial.println("Heating");
+//      }
+//   if(t>23){
+//     digitalWrite(relayC,HIGH);
+//     Serial.println("Cooling");
+//      } 
+//   if(h<40) {
+//     digitalWrite(relayH,HIGH);
+//     Serial.println("Humidifying");
+//      }
+//   if(h>70) {
+//     digitalWrite(relayD,HIGH);
+//     Serial.println("Drying");
+//      }
+//      else {
+//    digitalWrite(relayA,LOW);
+//    digitalWrite(relayC,LOW);
+//    digitalWrite(relayH,LOW);
+//    digitalWrite(relayD,LOW);
+//      }
+//delay(1000);
+  checkTime();
+  if (currentMode == MODE_SHOW_TIME) {
+    increaseSeconds();
+    Bluetooth_data();
+  } else {
+
+    if (elapsedButtonModeMillis > MODE_SET_TIMEOUT && elapsedButtonSetMillis > MODE_SET_TIMEOUT) {
+      currentMode = MODE_SHOW_TIME;
+    }
+    
+    previousTimeUpdateMillis = currentMillis;
+  }
+
+  if (buttonModePressed) {
+    modeButtonHandler();
+  }
+
+  if (buttonSetUpPressed) {
+    delay(250);
+    buttonSetUpHandler();
+  }
+
+  if (buttonSetDownPressed) {
+    delay(250);
+    buttonSetDownHandler();
+  }
+  
+  dataTransmission();
+  drawScreen();
+
+}
+
+void Bluetooth_data() {
+  
+  Serial.print(t);     //kirim serial nilai kelembaban
+  Serial.print(",");    
+  Serial.println(h);     //kirim serial nilai suhu
+  delay(1000);
+
+}
+
+ISR (PCINT2_vect)
+{
+  // Port D Interrupt occured
+    if (digitalRead(PIN_BUTTON_MODE) == LOW) {
+  //Pin D7 triggered the ISR on a Falling pulse
+  //D7_state = !D7_state;
+    modeButtonPressedInterrupt();
+  //Set LED 2 to state of D7_state boolean
+  //digitalWrite(ledPin2, D7_state);
+  }
+  // Check if this was D2
+  if (digitalRead(buttonPin1) == LOW) {
+  //Pin D2 triggered the ISR on a Falling pulse
+  //D2_state = !D2_state;
+    setUpButtonPressedInterrupt();
+  //Set LED 1 to state of D2_state boolean
+  //digitalWrite(ledPin1, D2_state);
+  }
+
+  // Check if this was D7
+  if (digitalRead(buttonPin2) == LOW) {
+  //Pin D7 triggered the ISR on a Falling pulse
+  //D5_state = !D5_state;
+    setDownButtonPressedInterrupt();
+  //Set LED 2 to state of D7_state boolean
+  //digitalWrite(ledPin2, D7_state);
+  }
+}
+
+void checkTime() {
+  DateTime now = RTC.now();
+  _years=now.year();
+  _months=now.month();
+  _date=now.day();
+  _hours=now.hour();
+  _minutes=now.minute();
+  _seconds=now.second();
+  
+  if (_minutes > 59) {
+    _minutes = 0;
+  }
+  if (_hours > 23) {
+    _hours = 0;
+  }
+  if (_m > 59) {
+    _m = 0;
+  }
+  if (_dt > _dtmax) {
+    _dt = 1;
+  }
+  if (_mt > 12) {
+    _mt = 1;
+  }
+  if (_yr > 50) {
+    _yr = 22;
+  }
+  if (_mt == 4 || 6 || 9 || 11) {
+    _dtmax = 30;
+  }
+  if (_mt == 2) {
+    _dtmax = 29;
+  }
+//  if (t1 > 10) {
+//    t1 = 0;
+//  }
+//  if (h1 > 10) {
+//    h1 = 0;
+//  }
+}
+
+void dataTransmission() {
+  char charData[28];
+  String data = String(_hours) + ":" + String(_minutes) 
+                + ":" + String(_seconds) + "," + String(_date) 
+                + "/" + String(_months) + "/" + String(_years) 
+                + "," + String(t,1) + "," + String(h,0);
+  data.toCharArray(charData,28);
+  dataMaster = charData;
+  Wire.beginTransmission(alamatSlave); // Master memulai pengiriman data ke alamat slave
+  Wire.write(dataMaster); // Master menuliskan data
+//  Serial.print("Master mengirimkan nilai Pesan : "); // Menampilkan konten pada Serial Monitor 
+//  Serial.println(dataMaster); // Menampilkan konten pada Serial Monitor 
+  Wire.endTransmission(); // Mengakiri sesi pengiriman data  
+}
+
+void modeButtonPressedInterrupt() {
+  buttonModePressed = true;
+}
+
+void modeButtonHandler() {
+  if (elapsedButtonModeMillis > BUTTON_MODE_DEBOUNCE_TIME) {
+    previousButtonModeMillis = currentMillis;
+    currentMode++;
+
+    if (currentMode > 8) {
+      currentMode = 0;
+    }
+  }
+  buttonModePressed = false;
+}
+
+void setUpButtonPressedInterrupt() {
+  buttonSetUpPressed = true;
+}
+
+void buttonSetUpHandler() {
+  if (elapsedButtonSetMillis > BUTTON_SET_DEBOUNCE_TIME) {
+    previousButtonSetMillis = currentMillis;
+
+    if (currentMode == MODE_SET_SECONDS) {
+      _s = 0;
+    }
+    if (currentMode == MODE_SET_MINUTES) {
+      _m++;
+    }
+    if (currentMode == MODE_SET_HOURS) {
+      _hr++;
+    }
+    if (currentMode == MODE_SET_YEARS) {
+      _yr++;
+    }
+    if (currentMode == MODE_SET_MONTHS) {
+      _mt++;
+    }
+    if (currentMode == MODE_SET_DATE) {
+      _dt++;
+    }
+    if (currentMode == MODE_SET_TEMP) {
+      t1++;
+    }
+    if (currentMode == MODE_SET_HUM) {
+      h1++;
+    }
+  }
+  buttonSetUpPressed = false;
+}
+
+
+void setDownButtonPressedInterrupt() {
+  buttonSetDownPressed = true;
+}
+
+void buttonSetDownHandler() {
+  if (elapsedButtonSetMillis > BUTTON_SET_DEBOUNCE_TIME) {
+    previousButtonSetMillis = currentMillis;
+
+    if (currentMode == MODE_SET_SECONDS) {
+      _s = 0;
+    }
+    if (currentMode == MODE_SET_MINUTES) {
+      _m--;
+      if (_m == 0 - 1) {
+         _m = 59;
+         _hr--;
+      }
+    }
+    if (currentMode == MODE_SET_HOURS) {
+      _hr--;
+      if (_hr < 0) {
+         _hr = 23;
+      }
+    }
+    if (currentMode == MODE_SET_YEARS) {
+      _yr--;
+    }
+    if (currentMode == MODE_SET_MONTHS) {
+      _mt--;
+    }
+    if (currentMode == MODE_SET_DATE) {
+      _dt--;
+    }
+    if (currentMode == MODE_SET_TEMP) {
+      t1--;
+    }
+    if (currentMode == MODE_SET_HUM) {
+      h1--;
+    }
+  }
+  buttonSetDownPressed = false;
+}
+
+//void setButtonPressedInterrupt() {
+//  buttonSetPressed = true;
+//}
+//
+//void buttonSetHandler() {
+//  if (elapsedButtonSetMillis > BUTTON_SET_DEBOUNCE_TIME) {
+//    previousButtonSetMillis = currentMillis;
+//
+//    if (currentMode == MODE_SET_SECONDS) {
+//      _s = 0;
+//    }
+//    if (currentMode == MODE_SET_MINUTES) {
+//      _m++;
+//    }
+//    if (currentMode == MODE_SET_HOURS) {
+//      _hr++;
+//    }
+//    if (currentMode == MODE_SET_YEARS) {
+//      _yr++;
+//    }
+//    if (currentMode == MODE_SET_MONTHS) {
+//      _mt++;
+//    }
+//    if (currentMode == MODE_SET_DATE) {
+//      _dt++;
+//    }
+//    if (currentMode == MODE_SET_TEMP) {
+//      t1++;
+//    }
+//    if (currentMode == MODE_SET_HUM) {
+//      h1++;
+//    }
+//  }
+//  buttonSetPressed = false;
+//}
+
+void increaseSeconds() {
+  elapsedTimeUpdateMillis = currentMillis - previousTimeUpdateMillis;
+
+  // Check if 1000ms, 1 second, has been elapsed
+  if (elapsedTimeUpdateMillis > 1000) {
+    previousTimeUpdateMillis = currentMillis - (elapsedTimeUpdateMillis - 1000);
+
+  }
+}
+
+void drawScreen() {
+  u8g2.firstPage();
+  
+  do {
+
+    if (currentMode != MODE_SHOW_TIME) {
+      u8g2.setCursor(8,15);
+      t = t1;
+      h = h1;
+      RTC.adjust(DateTime (_yr, _mt, _dt, _hr, _m, _s));
+      //u8g2.drawStr(15,10,"Setting waktu");
+//      u8g2.drawTriangle((currentMode - 1) * 20 + 1, 18, currentMode * 20 - 2, 20, (currentMode - 1) * 20 + 15, 18);
+//      u8g2.drawTriangle((currentMode - 1) * 20 + 1, 18, currentMode * 20 - 2, 20, (currentMode - 1) * 20 + 15, 18);
+       if (currentMode > 3 && currentMode < 7 ) {
+        u8g2.drawLine(currentMode*15+18, 17, currentMode*15+28, 17);
+       }
+       else if (currentMode == 7) {
+        u8g2.drawLine(70,1,70,15);
+       }
+       else if (currentMode == 8) {
+        u8g2.drawLine(120,1,120,15);
+       }
+       else {
+        u8g2.drawLine((currentMode - 1) * 15 + 5, 17, currentMode * 15 + 2, 17);
+       }
+
+    }  
+    u8g2.drawLine(0, 20, 128, 20);
+    drawTime();
+    drawData();
+
+  } while (u8g2.nextPage());
+}
+
+void drawTime() {
+  
+  sprintf_P(timeString, PSTR("%02d/%02d/%d<>%02d:%02d:%02d"), _date, _months, _years, _hours, _minutes, _seconds);
+  
+  u8g2.setFont(u8g2_font_courB08_tf);
+  u8g2.drawStr(3,32, timeString);
+
+}
+
+void drawData() {
+
+  String temp = String(t2,1) + "oC"; 
+  String hum = String(h2,0) + "%";
+  
+  u8g2.setFont(u8g2_font_VCR_OSD_mu);
+  u8g2.setCursor(8,15);
+  u8g2.print(temp);
+  u8g2.setCursor(80,15);
+  u8g2.print(hum);
+}
